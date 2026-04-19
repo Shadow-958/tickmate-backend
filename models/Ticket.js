@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-// Check if model already exists, if so return it
+// Check if model already exists; if so, export that to avoid recompilation errors
 if (mongoose.models.Ticket) {
   module.exports = mongoose.models.Ticket;
 } else {
@@ -9,85 +9,110 @@ if (mongoose.models.Ticket) {
     eventId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Event',
-      required: true
+      required: true,
     },
 
     // Attendee reference
     attendeeId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
-      required: true
+      required: true,
     },
 
     // Unique ticket identifier
     ticketNumber: {
       type: String,
       unique: true,
-      required: true
+      required: true,
     },
 
-    // QR Code for verification
+    // QR Code URL for the ticket
     qrCodeUrl: {
       type: String,
       required: true,
-      unique: true
+      unique: true,
     },
 
-    // QR code data for scanning
+    // QR Code data string scanned from the ticket
     qrCodeData: {
       type: String,
       required: true,
-      unique: true
+      unique: true,
     },
 
     // Payment information
     paymentId: {
       type: String,
-      required: true
+      required: true,
     },
 
+    // Price paid in smallest currency unit (e.g., cents)
     pricePaid: {
       type: Number,
       required: true,
-      min: 0
+      min: 0,
     },
 
+    // Payment status of the ticket
     paymentStatus: {
       type: String,
       enum: ['pending', 'completed', 'failed', 'refunded'],
-      default: 'pending'
+      default: 'pending',
     },
 
     // Ticket status
     status: {
       type: String,
       enum: ['active', 'cancelled', 'used', 'expired'],
-      default: 'active'
+      default: 'active',
     },
 
-    // Check-in information
+    // Check-in information for this ticket
     checkInStatus: {
       isCheckedIn: {
         type: Boolean,
-        default: false
+        default: false,
       },
       checkInTime: {
-        type: Date
+        type: Date,
       },
-      checkedInBy: {
+      // ✅ FIXED: Changed from checkedInBy to scannedBy to match your backend code
+      scannedBy: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'User'
+        ref: 'User',
       },
       checkInLocation: {
-        type: String
-      }
+        type: String,
+      },
+      // Optional: role of scanner (e.g., 'host', 'staff')
+      scannerRole: {
+        type: String,
+        default: 'host',
+      },
+      // Optional: human-readable name of the person who scanned
+      scannerName: {
+        type: String,
+      },
     },
 
-    // Booking information
-    bookingDate: {
-      type: Date,
-      default: Date.now
+    // Verification tracking specifically for staff scanning
+    verification: {
+      isScanned: { type: Boolean, default: false },
+      scannedAt: { type: Date },
+      scannedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Staff user reference
+      entryTime: { type: Date },
+      exitTime: { type: Date },
+      scanCount: { type: Number, default: 0 },
     },
+
+    // Notes added by staff members
+    staffNotes: [
+      {
+        staffId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        note: String,
+        createdAt: { type: Date, default: Date.now },
+      },
+    ],
 
     // Additional attendee information
     attendeeInfo: {
@@ -95,43 +120,29 @@ if (mongoose.models.Ticket) {
       dietaryRestrictions: String,
       emergencyContact: {
         name: String,
-        phone: String
-      }
+        phone: String,
+      },
     },
 
-    // Verification tracking for event staff
-    verification: {
-      isScanned: { type: Boolean, default: false },
-      scannedAt: { type: Date },
-      scannedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Staff member
-      entryTime: { type: Date },
-      exitTime: { type: Date },
-      scanCount: { type: Number, default: 0 }
+    // Booking date (when ticket was booked)
+    bookingDate: {
+      type: Date,
+      default: Date.now,
     },
-
-    // Staff notes array
-    staffNotes: [{
-      staffId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-      note: String,
-      createdAt: { type: Date, default: Date.now }
-    }],
-
-  }, { 
-    timestamps: true 
+  }, {
+    timestamps: true,
   });
 
-  // Indexes for performance
-  ticketSchema.index({ eventId: 1, attendeeId: 1 });
+  // Indexes for performance and uniqueness constraints
+  ticketSchema.index({ eventId: 1, attendeeId: 1 }, { unique: true });
   ticketSchema.index({ ticketNumber: 1 });
+  ticketSchema.index({ qrCodeUrl: 1 });
   ticketSchema.index({ qrCodeData: 1 });
   ticketSchema.index({ paymentId: 1 });
   ticketSchema.index({ status: 1 });
 
-  // Ensure one ticket per user per event
-  ticketSchema.index({ eventId: 1, attendeeId: 1 }, { unique: true });
-
   const Ticket = mongoose.model('Ticket', ticketSchema);
   module.exports = Ticket;
 
-  console.log('🎫 Ticket model loaded safely');
+  console.log('🎫 Ticket model loaded safely.');
 }

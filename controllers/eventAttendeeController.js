@@ -1,3 +1,5 @@
+// backend/controllers/eventAttendeeController.js - COMPLETE UPDATED FILE
+
 const Event = require('../models/Event');
 const Ticket = require('../models/Ticket');
 const User = require('../models/User');
@@ -22,6 +24,10 @@ const getAvailableEvents = async (req, res) => {
       sortOrder = 'asc'
     } = req.query;
 
+    console.log('🔍 Fetching available events with filters:', {
+      page, limit, category, city, search, sortBy
+    });
+
     // Build filter for available events only
     const filter = { 
       status: 'published',
@@ -45,18 +51,19 @@ const getAvailableEvents = async (req, res) => {
       ];
     }
 
-    // Price filter
+    // Price filter (convert to cents if needed)
     if (priceMin || priceMax) {
       filter['pricing.price'] = {};
-      if (priceMin) filter['pricing.price'].$gte = parseFloat(priceMin);
-      if (priceMax) filter['pricing.price'].$lte = parseFloat(priceMax);
+      if (priceMin) filter['pricing.price'].$gte = parseFloat(priceMin) * 100; // Convert to cents
+      if (priceMax) filter['pricing.price'].$lte = parseFloat(priceMax) * 100; // Convert to cents
     }
 
     // Date range filter
-    if (startDate || endDate) {
-      filter.startDateTime = {};
-      if (startDate) filter.startDateTime.$gte = new Date(startDate);
-      if (endDate) filter.startDateTime.$lte = new Date(endDate);
+    if (startDate) {
+      filter.startDateTime = { ...filter.startDateTime, $gte: new Date(startDate) };
+    }
+    if (endDate) {
+      filter.startDateTime = { ...filter.startDateTime, $lte: new Date(endDate) };
     }
 
     // Build sort object
@@ -93,6 +100,8 @@ const getAvailableEvents = async (req, res) => {
     // Get categories for filter options
     const categories = await Event.distinct('category', { status: 'published' });
 
+    console.log(`✅ Found ${events.length} events (page ${page}/${Math.ceil(totalEvents / limit)})`);
+
     res.status(200).json({
       success: true,
       count: eventsWithAvailability.length,
@@ -106,7 +115,7 @@ const getAvailableEvents = async (req, res) => {
       events: eventsWithAvailability
     });
   } catch (error) {
-    console.error('Get available events error:', error);
+    console.error('❌ Get available events error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error fetching events',
@@ -121,28 +130,25 @@ const getAvailableEvents = async (req, res) => {
 const getEventDetails = async (req, res) => {
   try {
     const eventId = req.params.id;
-    console.log('Received event ID:', eventId);
-    console.log('Event ID type:', typeof eventId);
-    console.log('Event ID length:', eventId.length);
+    console.log('🔍 Fetching event details for ID:', eventId);
 
     const event = await Event.findById(eventId)
       .populate('host', 'firstName lastName email hostProfile');
 
-    console.log('Event found:', !!event);
-
     if (!event) {
-      console.log('Event not found in database for ID:', eventId);
+      console.log('❌ Event not found for ID:', eventId);
       return res.status(404).json({
         success: false,
         message: 'Event not found'
       });
     }
 
-    // Increment view count (optional - only if stats field exists in your schema)
+    // Increment view count (optional - only if stats field exists)
     try {
       await Event.findByIdAndUpdate(eventId, { $inc: { 'stats.views': 1 } });
     } catch (viewError) {
-      console.log('Could not increment view count (stats field may not exist):', viewError.message);
+      // Ignore if stats field doesn't exist
+      console.log('⚠️ Could not increment view count (field may not exist)');
     }
 
     // Check if user already has a ticket (if authenticated)
@@ -171,14 +177,13 @@ const getEventDetails = async (req, res) => {
       }
     };
 
-    console.log('Returning event details for:', event.title);
+    console.log('✅ Returning event details for:', event.title);
     res.status(200).json({
       success: true,
       event: eventWithDetails
     });
   } catch (error) {
-    console.error('Get event details error:', error);
-    console.error('Error stack:', error.stack);
+    console.error('❌ Get event details error:', error);
     
     if (error.name === 'CastError') {
       return res.status(400).json({
@@ -202,6 +207,8 @@ const bookTicket = async (req, res) => {
   try {
     const { eventId, attendeeInfo = {} } = req.body;
     const attendeeId = req.user._id;
+
+    console.log(`🎫 Booking ticket for event ${eventId} by user ${attendeeId}`);
 
     // Validate event
     const event = await Event.findById(eventId);
@@ -246,41 +253,34 @@ const bookTicket = async (req, res) => {
     if (existingTicket) {
       return res.status(400).json({
         success: false,
-        message: 'You already have a ticket for this event'
+        message: 'You already have a ticket for this event',
+        existingTicket: {
+          ticketNumber: existingTicket.ticketNumber,
+          status: existingTicket.status
+        }
       });
     }
 
     // For free events, create ticket immediately
     if (event.pricing.isFree) {
-      const crypto = require('crypto');
-      const QRCode = require('qrcode');
-
       // Generate unique ticket number
       const ticketNumber = `TCK${Date.now()}${Math.floor(Math.random() * 1000)}`;
 
       // Generate QR code data
-      const qrCodeData = crypto.randomBytes(32).toString('hex');
-
-      // Generate QR code image
-      const qrCodeUrl = await QRCode.toDataURL(JSON.stringify({
-        ticketNumber,
-        eventId,
-        attendeeId,
-        validationCode: qrCodeData
-      }));
+      const qrCodeData = `${ticketNumber}-${eventId}-${attendeeId}`;
 
       // Create free ticket
       const ticket = new Ticket({
         eventId,
         attendeeId,
         ticketNumber,
-        qrCodeUrl,
         qrCodeData,
         paymentId: 'FREE_TICKET',
         pricePaid: 0,
         paymentStatus: 'completed',
         status: 'active',
-        attendeeInfo
+        attendeeInfo,
+        bookingDate: new Date()
       });
 
       await ticket.save();
@@ -294,13 +294,17 @@ const bookTicket = async (req, res) => {
         .populate('eventId', 'title startDateTime location')
         .populate('attendeeId', 'firstName lastName email');
 
+      console.log('✅ Free ticket booked successfully:', ticket.ticketNumber);
+
       res.status(201).json({
         success: true,
         message: 'Free ticket booked successfully!',
         ticket: populatedTicket
       });
     } else {
-      // For paid events, redirect to payment
+      // For paid events, return payment info
+      console.log('💳 Paid event - returning payment details');
+      
       res.status(200).json({
         success: true,
         message: 'Please proceed to payment',
@@ -309,13 +313,13 @@ const bookTicket = async (req, res) => {
           id: event._id,
           title: event.title,
           price: event.pricing.price,
-          currency: event.pricing.currency
+          currency: event.pricing.currency || 'INR'
         },
         nextStep: 'create_payment'
       });
     }
   } catch (error) {
-    console.error('Book ticket error:', error);
+    console.error('❌ Book ticket error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error booking ticket',
@@ -324,13 +328,78 @@ const bookTicket = async (req, res) => {
   }
 };
 
-// @desc    Get user's tickets
+// @desc    Get all bookings/tickets for the current user
+// @route   GET /api/attendee/my-bookings
+// @access  Private (attendee only)
+const getMyBookings = async (req, res) => {
+  try {
+    const userId = req.user._id;
+
+    console.log('📋 Fetching bookings for user:', userId);
+
+    // Find all tickets for this user
+    const tickets = await Ticket.find({ attendeeId: userId })
+      .populate({
+        path: 'eventId',
+        select: 'title description startDateTime endDateTime location pricing bannerImageUrl category'
+      })
+      .sort({ createdAt: -1 }); // Most recent first
+
+    console.log(`✅ Found ${tickets.length} tickets for user ${userId}`);
+
+    // Format the response
+    const bookings = tickets.map(ticket => ({
+      _id: ticket._id,
+      ticketId: ticket._id,
+      ticketNumber: ticket.ticketNumber,
+      event: ticket.eventId,
+      attendeeId: ticket.attendeeId,
+      pricePaid: ticket.pricePaid,
+      totalAmount: ticket.pricePaid,
+      status: ticket.status,
+      paymentStatus: ticket.paymentStatus,
+      checkInStatus: ticket.checkInStatus,
+      bookingDate: ticket.createdAt,
+      createdAt: ticket.createdAt,
+      updatedAt: ticket.updatedAt,
+      quantity: 1, // Assuming 1 ticket per booking
+      paymentId: ticket.paymentId,
+      orderId: ticket.orderId
+    }));
+
+    res.status(200).json({
+      success: true,
+      message: 'Bookings fetched successfully',
+      bookings,
+      tickets: bookings, // Provide both for compatibility
+      count: bookings.length,
+      stats: {
+        total: bookings.length,
+        active: bookings.filter(b => b.status === 'active').length,
+        cancelled: bookings.filter(b => b.status === 'cancelled').length,
+        checkedIn: bookings.filter(b => b.checkInStatus?.isCheckedIn).length
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching user bookings:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch bookings',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Get user's tickets (alias for my-bookings)
 // @route   GET /api/attendee/my-tickets
 // @access  Private (attendee only)
 const getMyTickets = async (req, res) => {
   try {
     const attendeeId = req.user._id;
     const { status = 'all', upcoming = false } = req.query;
+
+    console.log(`🎫 Fetching tickets for user ${attendeeId}, status: ${status}, upcoming: ${upcoming}`);
 
     // Build filter
     const filter = { attendeeId };
@@ -352,7 +421,7 @@ const getMyTickets = async (req, res) => {
       .sort({ createdAt: -1 });
 
     // Filter upcoming events if requested
-    if (upcoming) {
+    if (upcoming === 'true') {
       tickets = tickets.filter(ticket => 
         ticket.eventId && new Date(ticket.eventId.startDateTime) > new Date()
       );
@@ -390,6 +459,8 @@ const getMyTickets = async (req, res) => {
       };
     });
 
+    console.log(`✅ Found ${ticketsWithStatus.length} tickets`);
+
     res.status(200).json({
       success: true,
       count: ticketsWithStatus.length,
@@ -397,7 +468,7 @@ const getMyTickets = async (req, res) => {
       tickets: ticketsWithStatus
     });
   } catch (error) {
-    console.error('Get my tickets error:', error);
+    console.error('❌ Get my tickets error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error fetching tickets',
@@ -406,14 +477,60 @@ const getMyTickets = async (req, res) => {
   }
 };
 
-// @desc    Cancel ticket
-// @route   DELETE /api/attendee/tickets/:ticketId
+// @desc    Get single booking/ticket details
+// @route   GET /api/attendee/bookings/:ticketId
+// @access  Private (attendee only)
+const getBookingDetails = async (req, res) => {
+  try {
+    const { ticketId } = req.params;
+    const userId = req.user._id;
+
+    console.log(`📋 Fetching ticket ${ticketId} for user ${userId}`);
+
+    const ticket = await Ticket.findOne({
+      _id: ticketId,
+      attendeeId: userId
+    }).populate({
+      path: 'eventId',
+      populate: {
+        path: 'host',
+        select: 'firstName lastName email'
+      }
+    });
+
+    if (!ticket) {
+      return res.status(404).json({
+        success: false,
+        message: 'Booking not found or you do not have access to it'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Booking details fetched successfully',
+      booking: ticket
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching booking details:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch booking details',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Cancel ticket/booking
+// @route   PUT /api/attendee/bookings/:ticketId/cancel
 // @access  Private (attendee only)
 const cancelTicket = async (req, res) => {
   try {
     const { ticketId } = req.params;
     const attendeeId = req.user._id;
     const { reason } = req.body;
+
+    console.log(`❌ Cancelling ticket ${ticketId} for user ${attendeeId}`);
 
     // Find ticket
     const ticket = await Ticket.findOne({ 
@@ -457,26 +574,32 @@ const cancelTicket = async (req, res) => {
 
     // Handle refund for paid tickets (in real app, process actual refund)
     if (ticket.pricePaid > 0) {
-      // Update payment status if exists
-      await Payment.findOneAndUpdate(
-        { paymentId: ticket.paymentId },
-        { 
-          status: 'refunded',
-          'refund.isRefunded': true,
-          'refund.refundAmount': ticket.pricePaid,
-          'refund.refundDate': new Date(),
-          'refund.refundReason': reason || 'Ticket cancelled'
-        }
-      );
+      try {
+        await Payment.findOneAndUpdate(
+          { paymentId: ticket.paymentId },
+          { 
+            status: 'refunded',
+            'refund.isRefunded': true,
+            'refund.refundAmount': ticket.pricePaid,
+            'refund.refundDate': new Date(),
+            'refund.refundReason': reason || 'Ticket cancelled'
+          }
+        );
+      } catch (paymentError) {
+        console.log('⚠️ Could not update payment record:', paymentError.message);
+      }
     }
+
+    console.log('✅ Ticket cancelled successfully:', ticketId);
 
     res.status(200).json({
       success: true,
       message: 'Ticket cancelled successfully',
-      refundAmount: ticket.pricePaid
+      refundAmount: ticket.pricePaid,
+      ticket: ticket
     });
   } catch (error) {
-    console.error('Cancel ticket error:', error);
+    console.error('❌ Cancel ticket error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error cancelling ticket',
@@ -492,6 +615,8 @@ const downloadTicket = async (req, res) => {
   try {
     const { ticketId } = req.params;
     const attendeeId = req.user._id;
+
+    console.log(`📥 Downloading ticket ${ticketId} for user ${attendeeId}`);
 
     const ticket = await Ticket.findOne({ 
       _id: ticketId, 
@@ -513,7 +638,7 @@ const downloadTicket = async (req, res) => {
       success: true,
       ticket: {
         ticketNumber: ticket.ticketNumber,
-        qrCodeUrl: ticket.qrCodeUrl,
+        qrCodeData: ticket.qrCodeData,
         event: {
           title: ticket.eventId.title,
           startDateTime: ticket.eventId.startDateTime,
@@ -525,16 +650,57 @@ const downloadTicket = async (req, res) => {
           name: `${ticket.attendeeId.firstName} ${ticket.attendeeId.lastName}`,
           email: ticket.attendeeId.email
         },
-        bookingDate: ticket.bookingDate,
+        bookingDate: ticket.bookingDate || ticket.createdAt,
         pricePaid: ticket.pricePaid,
         status: ticket.status
       }
     });
+
+    console.log('✅ Ticket download data sent successfully');
   } catch (error) {
-    console.error('Download ticket error:', error);
+    console.error('❌ Download ticket error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error downloading ticket',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Get user's booking statistics
+// @route   GET /api/attendee/stats
+// @access  Private (attendee only)
+const getBookingStats = async (req, res) => {
+  try {
+    const userId = req.user._id;
+
+    console.log('📊 Fetching booking stats for user:', userId);
+
+    const tickets = await Ticket.find({ attendeeId: userId }).populate('eventId');
+
+    const stats = {
+      totalBookings: tickets.length,
+      activeTickets: tickets.filter(t => t.status === 'active').length,
+      cancelledTickets: tickets.filter(t => t.status === 'cancelled').length,
+      checkedInTickets: tickets.filter(t => t.checkInStatus?.isCheckedIn).length,
+      totalSpent: tickets.reduce((sum, ticket) => sum + (ticket.pricePaid || 0), 0),
+      upcomingEvents: tickets.filter(t => {
+        return t.eventId && new Date(t.eventId.startDateTime) > new Date() && t.status === 'active';
+      }).length
+    };
+
+    console.log('✅ Stats calculated:', stats);
+
+    res.status(200).json({
+      success: true,
+      stats
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching booking stats:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch booking statistics',
       error: error.message
     });
   }
@@ -544,7 +710,10 @@ module.exports = {
   getAvailableEvents,
   getEventDetails,
   bookTicket,
+  getMyBookings,
   getMyTickets,
+  getBookingDetails,
   cancelTicket,
-  downloadTicket
+  downloadTicket,
+  getBookingStats
 };

@@ -71,18 +71,18 @@ const userSchema = new mongoose.Schema({
 
 }, { timestamps: true });
 
-// Define indexes
+// Define indexes for performance and uniqueness
 userSchema.index({ email: 1 });
 userSchema.index({ username: 1 });
 userSchema.index({ selectedRole: 1 });
-userSchema.index({ clerkId: 1 }, { unique: true, sparse: true }); // New sparse unique index
+userSchema.index({ clerkId: 1 }, { unique: true, sparse: true }); 
 
-// Virtual for full name
+// Virtual property for full name combining first and last
 userSchema.virtual('fullName').get(function() {
   return `${this.firstName} ${this.lastName}`;
 });
 
-// Pre-save middleware to update onboarding status
+// Pre-save hook: mark onboardingCompleted true if selectedRole set and onboarding not done
 userSchema.pre('save', function(next) {
   if (this.selectedRole && !this.onboardingCompleted) {
     this.onboardingCompleted = true;

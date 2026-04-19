@@ -2,145 +2,125 @@ const Event = require('../models/Event');
 const Ticket = require('../models/Ticket');
 const User = require('../models/User');
 
-// @desc    Get assigned events for staff
-// @route   GET /api/staff/my-events
-// @access  Private (staff only)
+// Get the list of events assigned to staff with fallback
 const getMyAssignedEvents = async (req, res) => {
   try {
     const staffId = req.user._id;
-    
-    // Find events where this staff member is assigned
-    const events = await Event.find({
+
+    console.log('👤 Fetching assigned events for staff:', staffId);
+
+    // Primary query based on direct assignment in Event.assignedStaff array
+    let events = await Event.find({
       assignedStaff: staffId,
-      status: 'published'
+      status: 'published',
     })
-    .populate('host', 'firstName lastName email')
-    .select('title description startDateTime endDateTime location capacity ticketsSold status')
-    .sort({ startDateTime: 1 });
+      .populate('host', 'firstName lastName email')
+      .select('title description startDateTime endDateTime location capacity ticketsSold status')
+      .sort({ startDateTime: 1 });
 
-    const eventsWithStats = await Promise.all(events.map(async (event) => {
-      const totalTickets = await Ticket.countDocuments({ eventId: event._id, status: 'active' });
-      const scannedTickets = await Ticket.countDocuments({ 
-        eventId: event._id, 
-        'verification.isScanned': true 
-      });
+    console.log(`📋 Found ${events.length} events via assignedStaff query`);
 
-      return {
-        ...event.toObject(),
-        stats: {
-          totalTickets,
-          scannedTickets,
-          unscannedTickets: totalTickets - scannedTickets,
-          scanPercentage: totalTickets > 0 ? ((scannedTickets / totalTickets) * 100).toFixed(2) : 0
-        }
-      };
-    }));
+    // Fallback query: using user's profile assignedEvents list
+    if (events.length === 0) {
+      console.log('🔄 Trying fallback method via user profile...');
+      const staffUser = await User.findById(staffId).select('staffProfile.assignedEvents');
+      if (staffUser?.staffProfile?.assignedEvents?.length) {
+        events = await Event.find({
+          _id: { $in: staffUser.staffProfile.assignedEvents },
+          status: 'published',
+        })
+          .populate('host', 'firstName lastName email')
+          .select('title description startDateTime endDateTime location capacity ticketsSold status')
+          .sort({ startDateTime: 1 });
+
+        console.log(`📋 Found ${events.length} events via user profile fallback`);
+      }
+    }
+
+    // Calculate stats per event
+    const eventsWithStats = await Promise.all(
+      events.map(async (event) => {
+        const totalTickets = await Ticket.countDocuments({ eventId: event._id, status: 'active' });
+        const scannedTickets = await Ticket.countDocuments({ eventId: event._id, 'verification.isScanned': true });
+
+        return {
+          ...event.toObject(),
+          stats: {
+            totalTickets,
+            scannedTickets,
+            unscannedTickets: totalTickets - scannedTickets,
+            scanPercentage: totalTickets ? ((scannedTickets / totalTickets) * 100).toFixed(2) : '0.00',
+          },
+        };
+      })
+    );
+
+    console.log(`✅ Returning ${eventsWithStats.length} events with stats`);
 
     res.status(200).json({
       success: true,
       count: eventsWithStats.length,
-      events: eventsWithStats
+      events: eventsWithStats,
     });
   } catch (error) {
-    console.error('Get assigned events error:', error);
+    console.error('❌ Get assigned events error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error fetching assigned events',
-      error: error.message
+      message: 'Failed to fetch assigned events',
+      error: error.message,
     });
   }
 };
 
-// @desc    Scan/Verify ticket
-// @route   POST /api/staff/scan-ticket
-// @access  Private (staff only)
+// Scan ticket - mark scanned/checked in
 const scanTicket = async (req, res) => {
   try {
     const { ticketNumber, qrCodeData, eventId, action = 'entry' } = req.body;
     const staffId = req.user._id;
 
     if (!ticketNumber && !qrCodeData) {
-      return res.status(400).json({
-        success: false,
-        message: 'Ticket number or QR code data required'
-      });
+      return res.status(400).json({ success: false, message: 'Ticket number or QR code required' });
     }
 
-    // Build search query
     let query = {};
-    if (ticketNumber) {
-      query.ticketNumber = ticketNumber;
-    } else if (qrCodeData) {
-      query.qrCodeData = qrCodeData;
-    }
-
-    // Add event filter if provided
-    if (eventId) {
-      query.eventId = eventId;
-    }
+    if (ticketNumber) query.ticketNumber = ticketNumber;
+    else if (qrCodeData) query.qrCodeData = qrCodeData;
+    if (eventId) query.eventId = eventId;
 
     const ticket = await Ticket.findOne(query)
-      .populate('eventId', 'title startDateTime endDateTime location assignedStaff')
+      .populate('eventId', 'assignedStaff title startDateTime endDateTime')
       .populate('attendeeId', 'firstName lastName email');
 
     if (!ticket) {
-      return res.status(404).json({
-        success: false,
-        message: 'Ticket not found'
-      });
+      return res.status(404).json({ success: false, message: 'Ticket not found' });
     }
 
-    // Verify staff is assigned to this event
-    const isAssigned = ticket.eventId.assignedStaff.some(
-      staffMemberId => staffMemberId.toString() === staffId.toString()
-    );
-
-    if (!isAssigned) {
-      return res.status(403).json({
-        success: false,
-        message: 'You are not assigned to this event'
-      });
+    if (!ticket.eventId.assignedStaff.some((id) => id.toString() === staffId.toString())) {
+      return res.status(403).json({ success: false, message: 'You are not assigned to this event' });
     }
 
-    // Check ticket status
     if (ticket.status !== 'active') {
-      return res.status(400).json({
-        success: false,
-        message: `Ticket is ${ticket.status}. Cannot scan inactive tickets.`
-      });
+      return res.status(400).json({ success: false, message: `Ticket status ${ticket.status} invalid for scanning` });
     }
 
-    // Check if event has started (for entry)
     const now = new Date();
     const eventStart = new Date(ticket.eventId.startDateTime);
     const eventEnd = new Date(ticket.eventId.endDateTime);
 
     if (action === 'entry' && now < eventStart) {
-      return res.status(400).json({
-        success: false,
-        message: 'Event has not started yet'
-      });
+      return res.status(400).json({ success: false, message: 'Event has not started' });
     }
 
     if (now > eventEnd) {
-      return res.status(400).json({
-        success: false,
-        message: 'Event has already ended'
-      });
+      return res.status(400).json({ success: false, message: 'Event has ended' });
     }
 
-    // Initialize verification if not exists
-    if (!ticket.verification) {
-      ticket.verification = {};
-    }
+    if (!ticket.verification) ticket.verification = {};
 
-    // Handle different scan actions
     if (action === 'entry') {
       if (ticket.verification.isScanned) {
-        // Already scanned - show warning but allow re-scan
-        ticket.verification.scanCount = (ticket.verification.scanCount || 0) + 1;
+        ticket.verification.scanCount = (ticket.verification.scanCount || 1) + 1;
       } else {
-        // First time scan
         ticket.verification.isScanned = true;
         ticket.verification.scannedAt = now;
         ticket.verification.scannedBy = staffId;
@@ -149,15 +129,27 @@ const scanTicket = async (req, res) => {
       }
     } else if (action === 'exit') {
       if (!ticket.verification.isScanned) {
-        return res.status(400).json({
-          success: false,
-          message: 'Cannot record exit for unscanned ticket'
-        });
+        return res.status(400).json({ success: false, message: 'Cannot record exit for unscanned ticket' });
       }
       ticket.verification.exitTime = now;
     }
 
     await ticket.save();
+
+    // Emit real-time event using global socket function
+    if (global.emitToEvent) {
+      global.emitToEvent(eventId, 'attendee_checked_in', {
+        eventId,
+        eventTitle: ticket.eventId.title,
+        attendeeName: `${ticket.attendeeId.firstName} ${ticket.attendeeId.lastName}`,
+        ticketNumber: ticket.ticketNumber,
+        scannedBy: ticket.verification.scannedBy,
+        scannedAt: ticket.verification.scannedAt,
+        scannerRole: 'event_staff', // adjust as needed
+      });
+    } else {
+      console.warn('Global emitToEvent not available');
+    }
 
     res.status(200).json({
       success: true,
@@ -166,75 +158,52 @@ const scanTicket = async (req, res) => {
         ticketNumber: ticket.ticketNumber,
         attendee: {
           name: `${ticket.attendeeId.firstName} ${ticket.attendeeId.lastName}`,
-          email: ticket.attendeeId.email
+          email: ticket.attendeeId.email,
         },
         event: {
           title: ticket.eventId.title,
-          startDateTime: ticket.eventId.startDateTime
+          startDateTime: ticket.eventId.startDateTime,
         },
         verification: ticket.verification,
         scanCount: ticket.verification.scanCount,
-        isFirstScan: ticket.verification.scanCount === 1
-      }
+        isFirstScan: ticket.verification.scanCount === 1,
+      },
     });
   } catch (error) {
     console.error('Scan ticket error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error scanning ticket',
-      error: error.message
+      message: 'Failed to scan ticket',
+      error: error.message,
     });
   }
 };
 
-// @desc    Get event attendance details
-// @route   GET /api/staff/events/:eventId/attendance
-// @access  Private (staff only)
+// Get attendance details for event
 const getEventAttendance = async (req, res) => {
   try {
     const { eventId } = req.params;
     const staffId = req.user._id;
 
-    // Verify event exists and staff is assigned
-    const event = await Event.findById(eventId)
-      .populate('host', 'firstName lastName email');
-
+    const event = await Event.findById(eventId).populate('host', 'firstName lastName email');
     if (!event) {
-      return res.status(404).json({
-        success: false,
-        message: 'Event not found'
-      });
+      return res.status(404).json({ success: false, message: 'Event not found' });
     }
 
-    const isAssigned = event.assignedStaff.some(
-      staffMemberId => staffMemberId.toString() === staffId.toString()
-    );
-
-    if (!isAssigned) {
-      return res.status(403).json({
-        success: false,
-        message: 'You are not assigned to this event'
-      });
+    if (!event.assignedStaff.some((id) => id.toString() === staffId.toString())) {
+      return res.status(403).json({ success: false, message: 'You are not assigned to this event' });
     }
 
-    // Get all tickets for this event
     const tickets = await Ticket.find({ eventId, status: 'active' })
       .populate('attendeeId', 'firstName lastName email')
-      .populate('verification.scannedBy', 'firstName lastName')
       .sort({ 'verification.scannedAt': -1 });
 
-    // Calculate statistics
     const totalTickets = tickets.length;
-    const scannedTickets = tickets.filter(t => t.verification?.isScanned).length;
+    const scannedTickets = tickets.filter((t) => t.verification?.isScanned).length;
     const unscannedTickets = totalTickets - scannedTickets;
-    const attendanceRate = totalTickets > 0 ? ((scannedTickets / totalTickets) * 100).toFixed(2) : 0;
+    const attendanceRate = totalTickets ? ((scannedTickets / totalTickets) * 100).toFixed(2) : '0.00';
 
-    // Group by scan status
-    const scannedList = tickets.filter(t => t.verification?.isScanned);
-    const unscannedList = tickets.filter(t => !t.verification?.isScanned);
-
-    // Recent scans (last 10)
-    const recentScans = scannedList.slice(0, 10);
+    const recentScans = tickets.filter((t) => t.verification?.isScanned).slice(0, 10);
 
     res.status(200).json({
       success: true,
@@ -244,144 +213,130 @@ const getEventAttendance = async (req, res) => {
         startDateTime: event.startDateTime,
         endDateTime: event.endDateTime,
         location: event.location,
-        host: event.host
+        host: event.host,
       },
       statistics: {
         totalTickets,
         scannedTickets,
         unscannedTickets,
-        attendanceRate: parseFloat(attendanceRate)
+        attendanceRate,
       },
-      recentScans: recentScans.map(ticket => ({
-        ticketNumber: ticket.ticketNumber,
-        attendee: `${ticket.attendeeId.firstName} ${ticket.attendeeId.lastName}`,
-        scannedAt: ticket.verification.scannedAt,
-        scanCount: ticket.verification.scanCount
-      })),
-      allTickets: tickets.map(ticket => ({
+      recentScans,
+      allTickets: tickets.map((ticket) => ({
         _id: ticket._id,
         ticketNumber: ticket.ticketNumber,
-        attendee: {
-          name: `${ticket.attendeeId.firstName} ${ticket.attendeeId.lastName}`,
-          email: ticket.attendeeId.email
-        },
+        attendee: ticket.attendeeId,
         verification: ticket.verification,
         pricePaid: ticket.pricePaid,
-        bookingDate: ticket.createdAt
-      }))
+        bookingDate: ticket.createdAt,
+      })),
     });
   } catch (error) {
-    console.error('Get event attendance error:', error);
+    console.error('Get attendance error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error fetching event attendance',
-      error: error.message
+      message: 'Failed to fetch attendance',
+      error: error.message,
     });
   }
 };
 
-// @desc    Add staff note to ticket
-// @route   POST /api/staff/tickets/:ticketId/note
-// @access  Private (staff only)
+// Add note to ticket
 const addTicketNote = async (req, res) => {
   try {
     const { ticketId } = req.params;
     const { note } = req.body;
     const staffId = req.user._id;
 
-    if (!note || note.trim().length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Note content is required'
-      });
+    if (!note || !note.trim()) {
+      return res.status(400).json({ success: false, message: 'Note content is required' });
     }
 
-    const ticket = await Ticket.findById(ticketId)
-      .populate('eventId', 'assignedStaff');
-
+    const ticket = await Ticket.findById(ticketId);
     if (!ticket) {
-      return res.status(404).json({
-        success: false,
-        message: 'Ticket not found'
-      });
+      return res.status(404).json({ success: false, message: 'Ticket not found' });
     }
 
-    // Verify staff is assigned to this event
-    const isAssigned = ticket.eventId.assignedStaff.some(
-      staffMemberId => staffMemberId.toString() === staffId.toString()
-    );
-
-    if (!isAssigned) {
-      return res.status(403).json({
-        success: false,
-        message: 'You are not assigned to this event'
-      });
+    if (!ticket.eventId) {
+      return res.status(400).json({ success: false, message: 'Ticket event not found' });
     }
 
-    // Add note
-    if (!ticket.staffNotes) {
-      ticket.staffNotes = [];
+    // Check if staff assigned
+    const assigned = await Event.findOne({
+      _id: ticket.eventId,
+      assignedStaff: staffId,
+    });
+    if (!assigned) {
+      return res.status(403).json({ success: false, message: 'You are not assigned to this event' });
     }
 
+    ticket.staffNotes = ticket.staffNotes || [];
     ticket.staffNotes.push({
       staffId,
       note: note.trim(),
-      createdAt: new Date()
+      createdAt: new Date(),
     });
 
     await ticket.save();
 
-    res.status(200).json({
-      success: true,
-      message: 'Note added successfully'
-    });
+    res.status(200).json({ success: true, message: 'Note added successfully' });
   } catch (error) {
     console.error('Add ticket note error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error adding note',
-      error: error.message
+      message: 'Failed to add note',
+      error: error.message,
     });
   }
 };
 
-// @desc    Get staff dashboard data
-// @route   GET /api/staff/dashboard
-// @access  Private (staff only)
+// Staff dashboard data
 const getStaffDashboard = async (req, res) => {
   try {
     const staffId = req.user._id;
 
-    // Get events assigned to this staff member
-    const assignedEvents = await Event.find({
+    console.log('📊 Fetching staff dashboard for:', staffId);
+
+    let assignedEvents = await Event.find({
       assignedStaff: staffId,
-      status: 'published'
+      status: 'published',
     }).sort({ startDateTime: 1 });
 
-    // Get today's events
+    if (assignedEvents.length === 0) {
+      const staffUser = await User.findById(staffId);
+      if (staffUser?.staffProfile?.assignedEvents?.length) {
+        assignedEvents = await Event.find({
+          _id: { $in: staffUser.staffProfile.assignedEvents },
+          status: 'published',
+        }).sort({ startDateTime: 1 });
+      }
+    }
+
+    console.log(`📋 Found ${assignedEvents.length} assigned events`);
+
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
 
-    const todaysEvents = assignedEvents.filter(event => {
+    const todaysEvents = assignedEvents.filter((event) => {
       const eventDate = new Date(event.startDateTime);
       return eventDate >= today && eventDate < tomorrow;
     });
 
-    // Get upcoming events (next 7 days)
     const nextWeek = new Date(today);
     nextWeek.setDate(nextWeek.getDate() + 7);
 
-    const upcomingEvents = assignedEvents.filter(event => {
+    const upcomingEvents = assignedEvents.filter((event) => {
       const eventDate = new Date(event.startDateTime);
       return eventDate >= today && eventDate <= nextWeek;
     });
 
-    // Calculate total scans by this staff member
     const totalScans = await Ticket.countDocuments({
-      'verification.scannedBy': staffId
+      'verification.scannedBy': staffId,
     });
+
+    console.log(`📊 Dashboard stats: ${assignedEvents.length} assigned, ${todaysEvents.length} today, ${upcomingEvents.length} upcoming, ${totalScans} total scans`);
 
     res.status(200).json({
       success: true,
@@ -389,17 +344,18 @@ const getStaffDashboard = async (req, res) => {
         assignedEventsCount: assignedEvents.length,
         todaysEventsCount: todaysEvents.length,
         upcomingEventsCount: upcomingEvents.length,
-        totalScansPerformed: totalScans,
-        todaysEvents: todaysEvents.slice(0, 3), // Show first 3
-        upcomingEvents: upcomingEvents.slice(0, 5) // Show first 5
-      }
+        totalScans,
+        todaysEvents: todaysEvents.slice(0, 3),
+        upcomingEvents: upcomingEvents.slice(0, 5),
+      },
+      assignedEvents,
     });
   } catch (error) {
     console.error('Get staff dashboard error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error fetching dashboard data',
-      error: error.message
+      message: 'Failed to fetch dashboard data',
+      error: error.message,
     });
   }
 };
@@ -409,5 +365,5 @@ module.exports = {
   scanTicket,
   getEventAttendance,
   addTicketNote,
-  getStaffDashboard
+  getStaffDashboard,
 };

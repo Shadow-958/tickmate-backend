@@ -27,10 +27,30 @@ const eventsRoutes = require('./routes/eventsRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
-const FRONTEND_URLS = (process.env.FRONTEND_URL || 'http://localhost:5173')
+const FRONTEND_URLS = (process.env.FRONTEND_URL ||
+  'http://localhost:5173,http://tickmate-v2.s3-website-us-east-1.amazonaws.com')
   .split(',')
   .map((url) => url.trim())
   .filter(Boolean);
+const ALLOWED_ORIGINS = new Set(FRONTEND_URLS);
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow non-browser requests (curl, health checks, server-to-server)
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    if (ALLOWED_ORIGINS.has(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
+  credentials: true,
+  allowedHeaders: ["Authorization", "Content-Type", "Origin", "Accept", "X-Requested-With"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+};
 
 // Create HTTP server and Socket.IO instance
 const server = http.createServer(app);
@@ -58,12 +78,8 @@ app.use(helmet({
 }));
 
 // CORS configuration
-app.use(cors({
-  origin: FRONTEND_URLS,
-  credentials: true,
-  allowedHeaders: ["Authorization", "Content-Type"],
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-}));
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 // Rate limiting
 const limiter = rateLimit({
